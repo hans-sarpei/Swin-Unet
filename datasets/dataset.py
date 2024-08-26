@@ -32,10 +32,10 @@ class RandomGenerator(object):
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
 
-        if random.random() > 0.5:
-            image, label = random_rot_flip(image, label)
-        elif random.random() > 0.5:
-            image, label = random_rotate(image, label)
+        #if random.random() > 0.5:
+        #    image, label = random_rot_flip(image, label)
+        #elif random.random() > 0.5:
+        #    image, label = random_rotate(image, label)
         x, y = image.shape
         if x != self.output_size[0] or y != self.output_size[1]:
             image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=3)  # why not 3?
@@ -67,6 +67,38 @@ class Synapse_dataset(Dataset):
             filepath = self.data_dir + "/{}.npy.h5".format(vol_name)
             data = h5py.File(filepath)
             image, label = data['image'][:], data['label'][:]
+
+        sample = {'image': image, 'label': label}
+        if self.transform:
+            sample = self.transform(sample)
+        sample['case_name'] = self.sample_list[idx].strip('\n')
+        return sample
+
+
+class Isles_dataset(Dataset):
+    def __init__(self, base_dir, list_dir, split, transform=None):
+        self.transform = transform  # using transform in torch!
+        self.split = split
+        self.sample_list = open(os.path.join(list_dir, self.split+'.txt')).readlines()
+        self.data_dir = base_dir
+
+    def __len__(self):
+        return len(self.sample_list)
+
+    def __getitem__(self, idx):
+        if self.split == "train":
+            slice_name = self.sample_list[idx].strip('\n')
+            data_path = os.path.join(self.data_dir, slice_name+'.npz')
+            data = np.load(data_path)
+            image, label = data['image'], data['label']
+        else:
+            vol_name = self.sample_list[idx].strip('\n')
+            filepath = self.data_dir + "/{}.npy.h5".format(vol_name)
+            data = h5py.File(filepath)
+            image, label = data['image'][:], data['label'][:]
+            #target shape = (slice_dim, h, w) -> np.transpose()
+            image = image.transpose((2,0,1))
+            label = label.transpose((2,0,1))
 
         sample = {'image': image, 'label': label}
         if self.transform:

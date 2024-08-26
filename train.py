@@ -6,19 +6,19 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 from networks.vision_transformer import SwinUnet as ViT_seg
-from trainer import trainer_synapse
+from trainer import trainer_synapse, trainer_isles
 from config import get_config
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
-                    default='../data/Synapse/train_npz', help='root dir for data')
+                    default='./data_preprocessed/Isles/train_npz', help='root dir for data')
 parser.add_argument('--dataset', type=str,
-                    default='Synapse', help='experiment_name')
+                    default='Isles', help='experiment_name')
 parser.add_argument('--list_dir', type=str,
-                    default='./lists/lists_Synapse', help='list dir')
+                    default='./lists/lists_Isles', help='list dir')
 parser.add_argument('--num_classes', type=int,
-                    default=9, help='output channel of network')
-parser.add_argument('--output_dir', type=str, help='output dir')                   
+                    default=2, help='output channel of network')
+parser.add_argument('--output_dir', default="out", type=str, help='output dir')
 parser.add_argument('--max_iterations', type=int,
                     default=30000, help='maximum epoch number to train')
 parser.add_argument('--max_epochs', type=int,
@@ -34,7 +34,8 @@ parser.add_argument('--img_size', type=int,
                     default=224, help='input patch size of network input')
 parser.add_argument('--seed', type=int,
                     default=1234, help='random seed')
-parser.add_argument('--cfg', type=str, required=True, metavar="FILE", help='path to config file', )
+parser.add_argument('--cfg', type=str, metavar="FILE", help='path to config file', default='configs/swin_tiny_patch4_window7_224_lite.yaml')
+#required=True,
 parser.add_argument(
         "--opts",
         help="Modify config options by adding 'KEY VALUE' pairs. ",
@@ -57,8 +58,8 @@ parser.add_argument('--eval', action='store_true', help='Perform evaluation only
 parser.add_argument('--throughput', action='store_true', help='Test throughput only')
 
 args = parser.parse_args()
-if args.dataset == "Synapse":
-    args.root_path = os.path.join(args.root_path, "train_npz")
+# if args.dataset == "Synapse":
+#      args.root_path = os.path.join(args.root_path, "train_npz")
 config = get_config(args)
 
 
@@ -82,6 +83,11 @@ if __name__ == "__main__":
             'list_dir': './lists/lists_Synapse',
             'num_classes': 9,
         },
+        'Isles': {
+            'root_path': args.root_path,
+            'list_dir': './lists/lists_Isles',
+            'num_classes': 2,
+        }
     }
 
     if args.batch_size != 24 and args.batch_size % 6 == 0:
@@ -95,5 +101,7 @@ if __name__ == "__main__":
     net = ViT_seg(config, img_size=args.img_size, num_classes=args.num_classes).cuda()
     net.load_from(config)
 
-    trainer = {'Synapse': trainer_synapse,}
-    trainer[dataset_name](args, net, args.output_dir)
+    trainer_syn = {'Synapse': trainer_synapse,}
+    trainer_isles = {'Isles': trainer_isles,}
+    trainer_isles[dataset_name](args, net, args.output_dir)
+    #trainer_syn[dataset_name](args, net, args.output_dir)

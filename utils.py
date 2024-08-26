@@ -34,15 +34,18 @@ class DiceLoss(nn.Module):
             inputs = torch.softmax(inputs, dim=1)
         target = self._one_hot_encoder(target)
         if weight is None:
-            weight = [1] * self.n_classes
+            weight = torch.ones(self.n_classes).to(inputs.device)
+        else:
+            weight = torch.tensor(weight, dtype=torch.float32).to(inputs.device)
+
         assert inputs.size() == target.size(), 'predict {} & target {} shape do not match'.format(inputs.size(), target.size())
-        class_wise_dice = []
+
         loss = 0.0
         for i in range(0, self.n_classes):
             dice = self._dice_loss(inputs[:, i], target[:, i])
-            class_wise_dice.append(1.0 - dice.item())
-            loss += dice * weight[i]
-        return loss / self.n_classes
+            loss += dice * weight[i] # Scale the loss for each class by the corresponding weight
+
+        return loss / weight.sum()  # Normalize by the sum of the weights
 
 
 def calculate_metric_percase(pred, gt):
@@ -72,9 +75,9 @@ def test_single_volume(image, label, net, classes, patch_size=[256, 256], test_s
             with torch.no_grad():
                 outputs = net(input)
                 out = torch.argmax(torch.softmax(outputs, dim=1), dim=1).squeeze(0)
-                out = out.cpu().detach().numpy()
+                out = out.cpu().detach().numpy() #out.shape = (224,224)
                 if x != patch_size[0] or y != patch_size[1]:
-                    pred = zoom(out, (x / patch_size[0], y / patch_size[1]), order=0)
+                    pred = zoom(out, (x / patch_size[0], y / patch_size[1]), order=0) #redo interpolation -> pred.shape = (512,512)
                 else:
                     pred = out
                 prediction[ind] = pred
@@ -86,8 +89,9 @@ def test_single_volume(image, label, net, classes, patch_size=[256, 256], test_s
             out = torch.argmax(torch.softmax(net(input), dim=1), dim=1).squeeze(0)
             prediction = out.cpu().detach().numpy()
     metric_list = []
-    for i in range(1, classes):
-        metric_list.append(calculate_metric_percase(prediction == i, label == i))
+    #there are some labels with 0.9999 -> that's why I use np.round()
+    for i in range(0, classes):
+        metric_list.append(calculate_metric_percase(prediction == i, np.round(label) == i))
 
     if test_save_path is not None:
         img_itk = sitk.GetImageFromArray(image.astype(np.float32))

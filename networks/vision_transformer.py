@@ -57,7 +57,7 @@ class SwinUnet(nn.Module):
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             pretrained_dict = torch.load(pretrained_path, map_location=device)
             if "model"  not in pretrained_dict:
-                print("---start load pretrained modle by splitting---")
+                print("---start load pretrained model by splitting---")
                 pretrained_dict = {k[17:]:v for k,v in pretrained_dict.items()}
                 for k in list(pretrained_dict.keys()):
                     if "output" in k:
@@ -67,7 +67,7 @@ class SwinUnet(nn.Module):
                 # print(msg)
                 return
             pretrained_dict = pretrained_dict['model']
-            print("---start load pretrained modle of swin encoder---")
+            print("---start load pretrained model of swin encoder---")
 
             model_dict = self.swin_unet.state_dict()
             full_dict = copy.deepcopy(pretrained_dict)
