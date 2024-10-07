@@ -15,133 +15,10 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import cv2
 from tqdm import tqdm
-import torch.nn.functional as F
 from networks import unet_model, Swin_Unet
+from utils import *
 
 
-#paths_scans = glob("./data_/**/*.gz", recursive=True)
-#raw_ncct_paths = list(filter(lambda k: 'raw_data' in k and 'perfusion-maps' not in k and 'ncct' in k, paths_scans))
-#mask_paths = list(filter(lambda k: 'msk' in k, paths_scans))
-
-def save_model(model, epoch, path='best_model.pth'):
-    """Speichert das Modell."""
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-    }, path)
-
-
-def plot_images(images, predictions, targets, num_images=5):
-    """Plotting function for images, predictions, and targets."""
-    fig, axs = plt.subplots(num_images, 3, figsize=(15, 5 * num_images))
-    for i in range(num_images):
-        axs[i, 0].imshow(images[i][0].cpu().numpy())#.transpose(1, 2, 0))  # nur notwendig wenn Input = (B, 1, H,W)
-        axs[i, 0].set_title("Input Image")
-        axs[i, 1].imshow(predictions[i].cpu().numpy().squeeze(), cmap='gray')  # Squeeze to remove channel dimension
-        axs[i, 1].set_title("Prediction")
-        axs[i, 2].imshow(targets[i].cpu().numpy().squeeze(), cmap='gray')  # Squeeze to remove channel dimension
-        axs[i, 2].set_title("Target")
-
-    for ax in axs.flat:
-        ax.axis('off')
-
-    plt.tight_layout()
-    plt.show()
-
-
-def determine_crop_coordinates(mask, target_size):
-    """Bestimmt die Startkoordinaten für das Cropping basierend auf der Maske und der Zielgröße."""
-    if np.sum(mask) == 0:
-        raise ValueError("Die Maske enthält keine Werte.")
-
-    # Finde die Indizes, wo die Maske nicht Null ist
-    h_indices, w_indices, s_indices = np.nonzero(mask)
-
-    # Bestimmen der minimalen und maximalen Indizes
-    min_h, max_h = h_indices.min(), h_indices.max()
-    min_w, max_w = w_indices.min(), w_indices.max()
-    min_s, max_s = s_indices.min(), s_indices.max()
-
-    # Berechnen der Mitte der ROI
-    center_h = (min_h + max_h) // 2
-    center_w = (min_w + max_w) // 2
-    center_s = (min_s + max_s) // 2
-
-    # Berechnen der Startkoordinaten für den Crop
-    start_coords = (
-        max(center_h - target_size[0] // 2, 0),  # Sicherstellen, dass wir nicht außerhalb der Grenzen liegen
-        max(center_w - target_size[1] // 2, 0),
-        max(center_s - target_size[2] // 2, 0),
-    )
-    center_coords = (
-        min(max_h, center_h),
-        min(max_w, center_w),
-        min(min_s, center_s),
-    )
-
-    return center_coords
-
-
-def plot_dist(slice):
-    # Seaborn für die Darstellung verwenden
-    sns.histplot(slice)  # , kde=True)  # kde=True zeigt die Dichtekurve zusätzlich zum Histogramm
-
-    # Titel und Beschriftungen hinzufügen
-    plt.title('Verteilung der Werte')
-    plt.xlabel('Wert')
-    plt.ylabel('Häufigkeit')
-
-    # Anzeige der Grafik
-    plt.legend().remove()
-    plt.show()
-
-
-def min_max_normalization(data):
-    min_val = np.min(data)
-    max_val = np.max(data)
-    normalized_data = (data - min_val) / (max_val - min_val)
-    return normalized_data
-
-
-class DiceLoss(nn.Module):
-    def __init__(self, weights=None, num_classes=2, size_average=True):
-        super(DiceLoss, self).__init__()
-        self.weights = weights
-        self.num_classes = num_classes
-
-    def forward(self, inputs, targets, smooth=1e-5):
-
-        #get probabilities
-        inputs = F.sigmoid(inputs)
-
-        if self.weights is None:
-            weight = torch.ones(self.num_classes).to(inputs.device)
-        else:
-            weight = torch.tensor(self.weights, dtype=torch.float32).to(inputs.device)
-
-        # flatten label and prediction tensors
-        inputs = inputs.view(-1)
-        targets = targets.view(-1)
-
-        intersection_les = (inputs * targets).sum()
-        dice_les = (2. * intersection_les + smooth) / (inputs.sum() + targets.sum() + smooth)
-
-
-        intersection_non_les = ((inputs == 0) & (targets == 0)).sum()
-        dice_non_les = (2. * intersection_non_les + smooth) / ((inputs == 0).sum() + (targets == 0).sum() + smooth)
-
-        dice_all = dice_non_les * weight[0] + dice_les * weight[1]
-        weighted_dice = dice_all / self.num_classes
-
-        return 1 - weighted_dice
-
-
-#dice_loss = DiceLoss(weights=[0.0058, 1.9942], num_classes=2)
-
-#pred = torch.rand(1, 256, 256)
-#target = torch.randint(low=0, high=2, size=(1, 256, 256))
-
-#loss = dice_loss(pred, target)
 
 
 # 1. Datenvorbereitung
@@ -186,7 +63,6 @@ class ISLESDataset(Dataset):
 
         # Laden der Bilddaten
         cta = nib.load(cta_path).get_fdata()
-        #ctp = nib.load(ctp_path).get_fdata() -> difficult to integrate at the moment
         cbf = nib.load(cbf_path).get_fdata()
         cbv = nib.load(cbv_path).get_fdata()
         mtt = nib.load(mtt_path).get_fdata()
@@ -239,20 +115,15 @@ class ISLESDataset(Dataset):
         # Kombiniere die CTP-Parameter in einem Array
         ctp_combined_slice = np.stack([resized_cbf, resized_cbv, resized_mtt, resized_tmax], axis=-1)
 
-        # Normalisiere die Daten (optional, abhängig von der Modellarchitektur) - Z-Normalisierung gut??
-        #cta_data = (cta - np.mean(cta)) / np.std(cta)
-        #ctp_combined = (ctp_combined - np.mean(ctp_combined)) / np.std(ctp_combined)
-
         # Erstelle die Eingabe für das neuronale Netzwerk
-        # Die Eingabe könnte (512, 512, 74, 5) sein, wenn du CTP-Daten und CTA-Daten kombinierst
-        # Dabei wird die letzte Dimension die Anzahl der Kanäle sein
+        # Die Input-Size ist (512, 512, 5)
+        # Dabei wird die letzte Dimension die Anzahl der Input-Channels für Netz sein
         # Kanal 0: CTA-Daten
         # Kanäle 1-4: CTP-Parameter
         input_data = np.concatenate((cta_slice[..., np.newaxis], ctp_combined_slice), axis=-1)
         #input_data = cta_slice
 
         # Konvertiere die Daten in PyTorch-Tensoren
-        #input_tensor = torch.tensor(input_data, dtype=torch.float32).permute(3, 0, 1, 2) -> 4d permutation on volumes
         input_tensor = torch.tensor(input_data, dtype=torch.float32).permute(2,0,1)
         #input_tensor = torch.tensor(input_data, dtype=torch.float32).unsqueeze(0)
 
@@ -271,8 +142,8 @@ class ISLESDataset(Dataset):
 
         # Konvertiere alles in Tensoren
         sample = {
-            'image': input_tensor,  # Shape: (5, H, W, D)
-            'mask': target_tensor  # Shape: (H, W, D)
+            'image': input_tensor,  # Shape: (5, H, W)
+            'mask': target_tensor  # Shape: (H, W)
         }
 
         if tabular_features is not None:
@@ -294,7 +165,6 @@ def get_data_loaders(root_dir, batch_size=2, batch_size_test=1, transform=None, 
         tabular_csv (str, optional): Pfad zur tabellarischen CSV-Datei
     """
     # Liste aller Subjekte, falls
-    #subjects = [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))]
     subjects = os.listdir(root_dir)
 
     # Laden der tabellarischen Daten, falls vorhanden
@@ -331,11 +201,7 @@ def get_data_loaders(root_dir, batch_size=2, batch_size_test=1, transform=None, 
     return train_loader, val_loader, test_loader
 
 
-# 3. Modellarchitektur (U-Net für Segmentierung)
-# siehe networks unet_model.py
-
-
-# 4. Trainings- und Validierungsschleife
+# 3. Trainings- und Validierungsschleife
 def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e-4, device='cuda'):
     criterion = nn.BCEWithLogitsLoss()
 
@@ -350,36 +216,29 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
         model.train()
         train_loss = 0.0
         for batch in tqdm(train_loader, total=len(train_loader)):
-            images = batch['image'].to(device)  # Shape: (B, 6, H, W, D)
-            masks = batch['mask'].to(device)  # Shape: (B, H, W, D)
-            masks = masks.unsqueeze(1)  # Shape: (B, 1, H, W, D)
+            images = batch['image'].to(device)  # Shape: (B, 5, H, W)
+            masks = batch['mask'].to(device)  # Shape: (B, H, W)
+            masks = masks.unsqueeze(1)  # Shape: (B, 1, H, W)
 
             optimizer.zero_grad()
-            if torch.isnan(images).any():
-                continue
             outputs = model(images)  # Shape: (B, 1, H, W)
-            #loss_ce = criterion(outputs, masks)
+
             loss_dice = criterion_dice(outputs, masks)
-            #loss = 0.4 * loss_ce + 0.6 * loss_dice
+
             loss = loss_dice
 
-            # Anwendung der Gewichtung
-            #weighted_loss = loss * class_weights
-
-            # Durchschnitt über alle Elemente
-            #final_loss = weighted_loss.mean()
+            # loss_ce = criterion(outputs, masks)
+            # loss = 0.4 * loss_ce + 0.6 * loss_dice
 
             loss.backward()
             optimizer.step()
 
-            train_loss += loss.item() * images.size(0)
+            train_loss += loss.item()
 
             if loss_dice.item() < best_loss:
                 best_loss = loss_dice.item()
                 #save model parameters + plot Input Image + Prediction + Target
-
                 save_model(model, epoch)  # Save the model
-
                 # Prepare to plot images
                 with torch.no_grad():
                     preds = torch.sigmoid(outputs)
@@ -388,7 +247,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
                 # Plotting images, predictions, and targets (show all 5 images from batch)
                 plot_images(images*255, preds, masks, num_images=5)
 
-        train_loss /= len(train_loader.dataset)
+        train_loss /= len(train_loader)
 
         # Validierung
         model.eval()
@@ -430,14 +289,13 @@ if __name__ == "__main__":
 
     # Transformationen (z.B. könnte man auch Datenaugmentation hinzufügen)
     transform = transforms.Compose([
-        # Placeholder: 3D-Transformationen sind komplexer und erfordern spezialisierte Bibliotheken wie TorchIO oder MONAI
-        # Für Einfachheit hier nur eine Identity-Transformation
+        # Placeholder: für 2D Transformationen
     ])
 
     # Daten-Loader erstellen
     train_loader, val_loader, test_loader = get_data_loaders(
         root_dir=root_dir,
-        batch_size=5,  #can't use  batch_size bigger than 1 cause subject scans are in  different shape
+        batch_size=5,
         batch_size_test=1,
         transform=None,  # Anpassung je nach Bedarf
         test_size=0.1,
