@@ -17,6 +17,51 @@ import cv2
 from tqdm import tqdm
 from networks import unet_model, Swin_Unet
 from utils import *
+#from torch.cuda.amp import GradScaler, autocast -> deprecated
+from torch.amp import autocast, GradScaler
+import torch
+from torch.utils.data import Sampler
+
+from monai.losses import DiceLoss as DiceL
+from monai.metrics import compute_dice
+import torchvision.transforms.functional as F
+
+
+
+
+class RepeatVolumeSampler(Sampler):
+    def __init__(self, dataset):
+        """
+        Args:
+            dataset (CTVolumeDataset): Das Dataset, das die Slices pro Volumen enthält.
+        """
+        self.dataset = dataset
+        self.current_idx = 0  # Startindex für die Volumen
+        self.remaining_slices = dataset.num_slices[self.current_idx]  # Anzahl der Slices im ersten Volumen
+
+    def __iter__(self):
+        self.current_idx = 0
+        self.remaining_slices = self.dataset.num_slices[self.current_idx] #set it for next epoch to start
+        while True:
+            # Solange Slices im aktuellen Volumen verbleiben, gib den aktuellen Index aus
+            while self.remaining_slices > 0:
+                yield self.current_idx
+                self.remaining_slices -= 1
+
+            # Wenn alle Slices des aktuellen Volumens verarbeitet wurden, gehe zum nächsten Volumen
+            self.current_idx += 1
+
+            # Wenn das Ende des Volumen-Datasets erreicht ist, breche ab
+            if self.current_idx >= len(self.dataset):
+                break
+
+            # Setze die verbleibenden Slices für das nächste Volumen
+            self.remaining_slices = self.dataset.num_slices[self.current_idx]
+
+    def __len__(self):
+        # Die Gesamtzahl der Samples ist die Summe aller Slices über alle Volumen
+        return sum(self.dataset.num_slices)
+
 
 
 
@@ -24,7 +69,7 @@ from utils import *
 # 1. Datenvorbereitung
 class ISLESDataset(Dataset):
 
-    def __init__(self, subjects, root_dir, tabular_data=None, transform=None, target_size=(128, 128, 128)):
+    def __init__(self, subjects, root_dir, num_slices: list, tabular_data=None, transform=None, target_size=(128, 128, 128)):
         """
         Args:
             subjects (list): Liste der Subjekt-IDs (z.B. ['sub-stroke0001', 'sub-stroke0002'])
@@ -33,35 +78,37 @@ class ISLESDataset(Dataset):
             transform (callable, optional): Transformationen für die Bilddaten
         """
         self.subjects = subjects
+        #für jedes Volume bin ich initial bei Slice_index = 0
+        self.current_slice_idx = {i: 0 for i in range(len(self.subjects))}
         self.root_dir = root_dir
         self.tabular_data = tabular_data
         self.transform = transform
         self.target_size = target_size
+        self.num_slices = num_slices #[num_slice_vol1, num_slice_vol2, ...] für jedes Volumen wie viel Slices es hat
+        self.cache = {}
 
     def __len__(self):
         return len(self.subjects)
 
-    def __getitem__(self, idx):
-        #TODO remove this afterwards
-        #idx = 5
-        subject = self.subjects[idx]
+    def load_files(self, subject):
+        #create paths to load
         ses01_dir = os.path.join(self.root_dir, subject, 'ses-01')
+        # ses01_dir_ncct = os.path.join(os.path.split(self.root_dir)[0], 'raw_data', subject, 'ses-01')
         ses02_dir = os.path.join(self.root_dir, subject, 'ses-02')
 
-        # Bildmodalitäten in ses-01
+        # Create paths for all modalities (cta, cbf, cbv, etc.)
         cta_path = os.path.join(ses01_dir, f"{subject}_ses-01_space-ncct_cta.nii.gz")
-        ctp_path = os.path.join(ses01_dir, f"{subject}_ses-01_space-ncct_ctp.nii.gz")
-
         perfusion_dir = os.path.join(ses01_dir, 'perfusion-maps')
         cbf_path = os.path.join(perfusion_dir, f"{subject}_ses-01_space-ncct_cbf.nii.gz")
         cbv_path = os.path.join(perfusion_dir, f"{subject}_ses-01_space-ncct_cbv.nii.gz")
         mtt_path = os.path.join(perfusion_dir, f"{subject}_ses-01_space-ncct_mtt.nii.gz")
         tmax_path = os.path.join(perfusion_dir, f"{subject}_ses-01_space-ncct_tmax.nii.gz")
-
+        # ncct_path = os.path.join(ses01_dir_ncct, f"{subject}_ses-01_space-ncct.nii.gz")
         # Mask in ses-02
         mask_path = os.path.join(ses02_dir, f"{subject}_ses-02_lesion-msk.nii.gz")
 
-        # Laden der Bilddaten
+
+        # Laden der CT-Bildmodalitäten
         cta = nib.load(cta_path).get_fdata()
         cbf = nib.load(cbf_path).get_fdata()
         cbv = nib.load(cbv_path).get_fdata()
@@ -70,13 +117,41 @@ class ISLESDataset(Dataset):
 
         # Laden der Maske
         mask = nib.load(mask_path).get_fdata()
+
+        return [cta, cbf, cbv, mtt, tmax, mask]
+
+
+    def __getitem__(self, idx):
+        subject = self.subjects[idx]
+        #get the first slice_index for the current volume 'self.subjects[idx]'
+        slice_index = self.current_slice_idx[idx]
+
+        # Update the current slice index for Volume self.subjects[idx]
+        self.current_slice_idx[idx] += 1
+
+        # Reset slice index if we reach the end of the volume
+        if self.current_slice_idx[idx] >= self.num_slices[idx]:
+            self.current_slice_idx[idx] = 0  # Reset to 0 for next epoch
+
+
+
+        #Check weather subject volume is already in cache
+        if subject in self.cache:
+            data = self.cache[subject]
+        else:
+            data = self.load_files(subject)
+            self.cache[subject] = data
+
+        cta, cbf, cbv, mtt, tmax, mask = data
+
         mask = mask.round().astype(np.uint8)
 
-        #get a randonm slice of the current volume
-        #TODO all possible slices or just the ones where mask has at least one Non-Zero value???
-        #slices_idx = list(range(cta.shape[-1]))
-        slices_idx = np.unique(np.argwhere(mask != 0)[:, -1])
-        target_slice_idx = np.random.choice(slices_idx)
+        #get a random slice idx of the current volume with a size >= median
+        #median_nz_count_over_all_slices = np.median(np.unique(np.sum(mask, axis=(0,1)))[1:]) #excluding zero-valued slices
+        #slices_idx = np.argwhere(np.sum(mask, axis=(0,1)) >= median_nz_count_over_all_slices)
+        #slices_idx = np.unique(np.argwhere(mask != 0)[:, -1])
+        target_slice_idx = slice_index
+        #target_slice_idx = np.random.choice(slices_idx[...,0])
 
         cta_slice = cta[..., target_slice_idx]
         cbf_slice = cbf[..., target_slice_idx]
@@ -84,6 +159,9 @@ class ISLESDataset(Dataset):
         mtt_slice = mtt[..., target_slice_idx]
         tmax_slice = tmax[..., target_slice_idx]
         mask_slice = mask[..., target_slice_idx]
+
+        #put them on the GPU -> didnt work with threading let things on the CPU
+
 
         #preprocessing starts here (clip, resize, min_max)
         # (1) clip nur cta slice erstmal
@@ -96,24 +174,25 @@ class ISLESDataset(Dataset):
         # (2) resize (512x512)
         # Resize das Bild mit bilinearer Interpolation
         resized_cta = cv2.resize(cta_slice, (512, 512), interpolation=cv2.INTER_LINEAR)
-        resized_cbf = cv2.resize(cbf_slice, (512,512), interpolation=cv2.INTER_LINEAR)
-        resized_cbv = cv2.resize(cbv_slice, (512,512), interpolation=cv2.INTER_LINEAR)
-        resized_mtt = cv2.resize(mtt_slice, (512,512), interpolation=cv2.INTER_LINEAR)
-        resized_tmax = cv2.resize(tmax_slice, (512,512), interpolation=cv2.INTER_LINEAR)
+        resized_cbf = cv2.resize(cbf_slice, (512, 512), interpolation=cv2.INTER_LINEAR)
+        resized_cbv = cv2.resize(cbv_slice, (512, 512), interpolation=cv2.INTER_LINEAR)
+        resized_mtt = cv2.resize(mtt_slice, (512, 512), interpolation=cv2.INTER_LINEAR)
+        resized_tmax = cv2.resize(tmax_slice, (512, 512), interpolation=cv2.INTER_LINEAR)
 
         # Resize die Maske mit nearest-neighbor Interpolation
         resized_mask = cv2.resize(mask_slice, (512, 512), interpolation=cv2.INTER_NEAREST)
 
         # (3) min_max normalisierung
-        #cta_slice = min_max_normalization(resized_cta)
-        cta_slice = resized_cta
-        #cbf_slice = min_max_normalization(cbf_slice)
-        #cbv_slice = min_max_normalization(cbv_slice)
-        #mtt_slice = min_max_normalization(mtt_slice)
-        #tmax_slice = min_max_normalization(tmax_slice)
+        cta_slice = min_max_normalization(resized_cta)
+        #cta_slice = resized_cta
+        cbf_slice = min_max_normalization(resized_cbf)
+        cbv_slice = min_max_normalization(resized_cbv)
+        mtt_slice = min_max_normalization(resized_mtt)
+        tmax_slice = min_max_normalization(resized_tmax)
 
         # Kombiniere die CTP-Parameter in einem Array
-        ctp_combined_slice = np.stack([resized_cbf, resized_cbv, resized_mtt, resized_tmax], axis=-1)
+        ctp_combined_slice = np.stack([cbf_slice, cbv_slice, mtt_slice, tmax_slice], axis=-1)
+        #ctp_combined_slice = np.stack([resized_cbf, resized_cbv, resized_mtt, resized_tmax], axis=-1)
 
         # Erstelle die Eingabe für das neuronale Netzwerk
         # Die Input-Size ist (512, 512, 5)
@@ -151,6 +230,17 @@ class ISLESDataset(Dataset):
 
         return sample
 
+def calculate_num_slices_per_volume(subject_list: list):
+    r_dir = '/storage/ISLES24/ISLES24/raw_data'
+    num_slices = []
+    for subject in subject_list:
+        ses_1_path = os.path.join(r_dir, subject, 'ses-01')
+        ncct_path = os.path.join(ses_1_path, f'{subject}_ses-01_ncct.nii.gz')
+        ncct_data = nib.load(ncct_path).get_fdata()
+        num_slices.append(ncct_data.shape[-1])
+    return num_slices
+
+
 
 # 2. Dataloader
 def get_data_loaders(root_dir, batch_size=2, batch_size_test=1, transform=None, test_size=0.2, random_state=42,
@@ -185,58 +275,83 @@ def get_data_loaders(root_dir, batch_size=2, batch_size_test=1, transform=None, 
     train_subjects, val_subjects = train_test_split(
         train_subjects, test_size=test_size * 2, random_state=random_state)
 
+    #Berechne auf train, val und test_subjects die Anzahl an Slices pro Volumen
+    num_slices_train = calculate_num_slices_per_volume(train_subjects)
+    num_slices_val = calculate_num_slices_per_volume(val_subjects)
+    num_slices_test = calculate_num_slices_per_volume(test_subjects)
+
+
+
+
     # Erstellen der Dataset-Objekte
-    train_dataset = ISLESDataset(train_subjects, root_dir, tabular_data=tabular_df, transform=transform)
-    val_dataset = ISLESDataset(val_subjects, root_dir, tabular_data=tabular_df, transform=transform)
-    test_dataset = ISLESDataset(test_subjects, root_dir, tabular_data=tabular_df)
+    train_dataset = ISLESDataset(train_subjects, root_dir, tabular_data=tabular_df, transform=transform, num_slices=num_slices_train)
+    val_dataset = ISLESDataset(val_subjects, root_dir, tabular_data=tabular_df, transform=transform, num_slices=num_slices_val)
+    test_dataset = ISLESDataset(test_subjects, root_dir, tabular_data=tabular_df, num_slices=num_slices_test)
     #print(train_dataset[0])
     #print(val_dataset[0])
     #print(test_dataset[0])
 
-    # Erstellen der DataLoader
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size_test, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=False)
+    #sampler gibt solange den CT-Volume Index zurück bis alle Slices vom Dataloader gezogen wurden
+    #dies stellt sicher dass während Epoche jedes Slice vom Volumen einmal gesehen wurde
+    sampler_train = RepeatVolumeSampler(train_dataset)
+    sampler_val = RepeatVolumeSampler(val_dataset)
+    sampler_test = RepeatVolumeSampler(test_dataset)
+
+    # Erstellen der DataLoader shuffle=True -> muss ich entfernen da sonst nicht sichergestellt werden kann,
+    # dass alle slices pro volumen gesehen werden
+
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last=True, #persistent_workers=True,
+                              num_workers=0, sampler=sampler_train, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size_test, shuffle=False, sampler=sampler_val, num_workers=0,
+                            )#persistent_workers=True
+    test_loader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=False, sampler=sampler_test)
 
     return train_loader, val_loader, test_loader
 
 
 # 3. Trainings- und Validierungsschleife
 def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e-4, device='cuda'):
-    criterion = nn.BCEWithLogitsLoss()
 
-    #class_weights = torch.tensor([0.0058, 1.9942]).to(device)
-    criterion_dice = DiceLoss(num_classes=2, weights=[0.0058, 1.9942])
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    class_weights = torch.tensor([0.0058, 1.9942]).to(device)
+    criterion_dice = DiceL(sigmoid=True, weight=class_weights)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)#AdamW anstelle von Adam verwenden
+    scaler = GradScaler()
 
     model = model.to(device)
 
     best_loss = 2.0
+
+
     for epoch in range(num_epochs):
-        model.train()
         train_loss = 0.0
-        for batch in tqdm(train_loader, total=len(train_loader)):
+        model.train()
+        for i, batch in enumerate(tqdm(train_loader, total=len(train_loader))):
             images = batch['image'].to(device)  # Shape: (B, 5, H, W)
             masks = batch['mask'].to(device)  # Shape: (B, H, W)
             masks = masks.unsqueeze(1)  # Shape: (B, 1, H, W)
 
             optimizer.zero_grad()
-            outputs = model(images)  # Shape: (B, 1, H, W)
 
-            loss_dice = criterion_dice(outputs, masks)
+            with autocast('cuda' if torch.cuda.is_available() else 'cpu'):
+                outputs = model(images)  # Shape: (B, 1, H, W)
+                loss_dice = criterion_dice(outputs, masks)# returns (B,C,1,1) -> torch.squeeze()
 
-            loss = loss_dice
+                # Berechne den Mean Loss
+                mean_loss = loss_dice.mean()
+                loss = mean_loss
 
-            # loss_ce = criterion(outputs, masks)
-            # loss = 0.4 * loss_ce + 0.6 * loss_dice
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-            loss.backward()
-            optimizer.step()
+            #loss.backward()
+            #optimizer.step()
 
             train_loss += loss.item()
 
-            if loss_dice.item() < best_loss:
-                best_loss = loss_dice.item()
+            if loss.item() < best_loss:
+                best_loss = loss.item()
                 #save model parameters + plot Input Image + Prediction + Target
                 save_model(model, epoch)  # Save the model
                 # Prepare to plot images
@@ -245,14 +360,15 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
                     #preds = (preds > 0.5).float()  # Convert predictions to binary
 
                 # Plotting images, predictions, and targets (show all 5 images from batch)
-                plot_images(images*255, preds, masks, num_images=5)
+                plot_images(images*255, preds, masks, num_images=2, epoch=epoch, batch=i+1, loss=best_loss)
 
-        train_loss /= len(train_loader)
+        train_loss /= len(train_loader) #get a mean over all iterations in the current epoch
 
         # Validierung
         model.eval()
         val_loss = 0.0
         dice = 0.0
+        total_samples = 0
         with torch.no_grad():
             for batch in tqdm(val_loader, total=len(val_loader)):
                 images = batch['image'].to(device)
@@ -260,17 +376,20 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
                 masks = masks.unsqueeze(1)
 
                 outputs = model(images)
-                loss = criterion(outputs, masks)
-                val_loss += loss.item() * images.size(0)
+                loss = criterion_dice(outputs, masks)
+                mean_loss = loss.mean()
+                val_loss += mean_loss.item()
 
                 # Dice Score
-                preds = torch.sigmoid(outputs)
-                preds = (preds > 0.5).float()
-                intersection = (preds * masks).sum()
-                dice += (2. * intersection + 1e-6) / (preds.sum() + masks.sum() + 1e-6)  #(dim=(2,3,4) when using volumes)
+                #prediction = torch.sigmoid(outputs) #da es bei meiner MONAI Version nicht ein sigmoid=True Flag gibt.
 
-        val_loss /= len(val_loader.dataset)
-        dice_score_val = (dice / len(val_loader.dataset)).item()
+                #dice_scores = compute_dice(prediction, masks, ignore_empty=True) -> mit compute_dice() hab ich immer wieder NANs erhalten
+                #wenn es für eine Klasse keinen Overlap auf der Klasse gab
+
+                dice += 1 - mean_loss.item()  #(dim=(2,3,4) when using volumes)
+
+        val_loss /= len(val_loader)
+        dice_score_val = (dice / len(val_loader))
 
         print(
             f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Dice Score: {dice_score_val:.4f}")
@@ -282,10 +401,12 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
 # 6. Main program
 if __name__ == "__main__":
     # Pfad zum Root-Verzeichnis
-    root_dir = os.path.join(os.getcwd(), 'data_', 'derivatives')
+    #root_dir = os.path.join(os.getcwd(), 'data_', 'derivatives') -> lokaler Pfad
+    root_dir = '/storage/ISLES24/ISLES24/derivatives'
+
 
     # Optional: Pfad zur tabellarischen CSV-Datei
-    tabular_csv = "path_to_tabular_data.csv"  # Anpassen oder auf None setzen, wenn nicht vorhanden
+    #tabular_csv = "path_to_tabular_data.csv"  # Anpassen oder auf None setzen, wenn nicht vorhanden
 
     # Transformationen (z.B. könnte man auch Datenaugmentation hinzufügen)
     transform = transforms.Compose([
@@ -295,7 +416,7 @@ if __name__ == "__main__":
     # Daten-Loader erstellen
     train_loader, val_loader, test_loader = get_data_loaders(
         root_dir=root_dir,
-        batch_size=5,
+        batch_size=2,
         batch_size_test=1,
         transform=None,  # Anpassung je nach Bedarf
         test_size=0.1,
@@ -314,6 +435,6 @@ if __name__ == "__main__":
         train_loader=train_loader,
         val_loader=val_loader,
         num_epochs=150,
-        learning_rate=1e-3,#1e-4
+        learning_rate=1e-4,#1e-4
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )

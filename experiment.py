@@ -4,6 +4,26 @@ import numpy as np
 from glob import glob
 import nibabel as nib
 
+from monai.losses.dice import *  # NOQA
+import torch
+from monai.losses.dice import DiceLoss
+from monai.metrics import compute_dice
+B, C, H, W = 2, 2, 512, 512
+input = torch.rand(B, C, H, W)
+#target_idx = torch.randint(low=0, high=C - 1, size=(B, H, W)).long()
+#target_idx = torch.zeros(size=(B,H,W)).long()
+#target = one_hot(target_idx[:, None, ...], num_classes=C)
+#setting both inputs from both batches to only zero-maps
+target = torch.zeros(size=(B,C,H,W))
+target[:,0,...] = 1
+self = DiceLoss(reduction='none')
+loss = DiceLoss(reduction='mean')
+l = self(input, target)
+print(l)
+
+
+
+
 def compute_class_weights(targets, num_classes):
     """
     Berechnet die Gewichte für jede Klasse basierend auf der inversen Häufigkeit.

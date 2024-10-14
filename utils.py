@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -15,9 +17,12 @@ def save_model(model, epoch, path='best_model.pth'):
     }, path)
 
 
-def plot_images(images, predictions, targets, num_images=5):
-    """Plotting function for images, predictions, and targets."""
+def plot_images(images, predictions, targets, epoch, batch, loss,num_images=5):
+    """Plotting function for images, predictions, and targets.
+    images shape = (1, 5, 512, 512)
+    """
     fig, axs = plt.subplots(num_images, 3, figsize=(15, 5 * num_images))
+    fig.text(0.01, 0.5, f"Epoch:{epoch}, Batch:{batch}, Loss:{loss}", va='center', ha='center', rotation='vertical', fontsize=12)
     for i in range(num_images):
         axs[i, 0].imshow(images[i][0].cpu().numpy())#.transpose(1, 2, 0))  # nur notwendig wenn Input = (B, 1, H,W)
         axs[i, 0].set_title("Input Image")
@@ -30,7 +35,18 @@ def plot_images(images, predictions, targets, num_images=5):
         ax.axis('off')
 
     plt.tight_layout()
-    plt.show()
+
+    # Speichere die Abbildung statt sie anzuzeigen
+    # Erstelle einen dynamischen Dateinamen basierend auf Epoch und Batch
+    out_dir = "./results"
+    os.makedirs(out_dir, exist_ok=True)
+    filename = os.path.join(out_dir, f"graph_epoch_{epoch}_batch_{batch}.png")
+    plt.savefig(filename, dpi=300, bbox_inches='tight')  # dpi kann für die Auflösung angepasst werden
+
+    # Optional: Schließe die Abbildung, um Speicher freizugeben
+    plt.close(fig)
+
+
 
 
 def determine_crop_coordinates(mask, target_size):
@@ -83,7 +99,10 @@ def plot_dist(slice):
 def min_max_normalization(data):
     min_val = np.min(data)
     max_val = np.max(data)
-    normalized_data = (data - min_val) / (max_val - min_val)
+    if min_val == max_val:
+        normalized_data = (data - min_val + 1e-8) / (max_val - min_val + 1e-8)
+    else:
+        normalized_data = (data - min_val) / (max_val - min_val)
     return normalized_data
 
 class DiceLoss(nn.Module):

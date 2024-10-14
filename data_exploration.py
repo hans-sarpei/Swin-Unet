@@ -4,20 +4,22 @@ import nibabel as nib
 from tqdm import tqdm
 import numpy as np
 
-root_dir = os.path.join(os.getcwd(), 'data_', 'derivatives')
+#root_dir = os.path.join(os.getcwd(), 'data_', 'derivatives')
+root_dir_ncct = '/storage/ISLES24/ISLES24/raw_data'
 
-subjects = os.listdir(root_dir)
+subjects = os.listdir(root_dir_ncct)
 all_voxel_sizes = []
 
 for subject in tqdm(subjects, total=len(subjects)):
 
-    ses01_dir = os.path.join(root_dir, subject, 'ses-01')
+    ses01_dir = os.path.join(root_dir_ncct, subject, 'ses-01')
 
     # Bildmodalitäten in ses-01
     cta_path = os.path.join(ses01_dir, f"{subject}_ses-01_space-ncct_cta.nii.gz")
+    ncct_path = os.path.join(ses01_dir, f"{subject}_ses-01_ncct.nii.gz")
 
     #get physical voxel_sizes for each subject
-    (cta_h, cta_w, cta_d) = nib.load(cta_path).header.get_zooms() #in mm
+    (cta_h, cta_w, cta_d) = nib.load(ncct_path).header.get_zooms() #in mm
 
 
     voxel_sizes_cta = (cta_h, cta_w, cta_d)
@@ -26,7 +28,7 @@ for subject in tqdm(subjects, total=len(subjects)):
 
 
 
-    with open('voxel_sizes.txt', 'a') as f:
+    with open('voxel_sizes_ncct.txt', 'a') as f:
         f.write(f"Subject {subject} hat Voxel-Groeße (in mm): {voxel_sizes_cta}\n")
 
 all_voxel_sizes = np.array(all_voxel_sizes)
@@ -41,7 +43,7 @@ boundaries_h = (min_h, max_h)
 boundaries_w = (min_w, max_w)
 boundaries_d = (min_d, max_d)
 
-with open('voxel_sizes.txt', 'a') as f:
+with open('voxel_sizes_ncct.txt', 'a') as f:
     f.write(f'Bounderies for h-dimension: {boundaries_h}\n')
     f.write(f'Bounderies for w-dimension: {boundaries_w}\n')
     f.write(f'Bounderies for d-dimension: {boundaries_d}\n')
