@@ -271,7 +271,7 @@ def get_data_loaders(root_dir, batch_size=2, batch_size_test=1, transform=None, 
 
     # Aufteilen in Training und Validierung
     train_subjects, test_subjects = train_test_split(
-        subjects, test_size=test_size, random_state=random_state)
+        subjects[:7], test_size=test_size, random_state=random_state)
     train_subjects, val_subjects = train_test_split(
         train_subjects, test_size=test_size * 2, random_state=random_state)
 
@@ -348,7 +348,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
             #loss.backward()
             #optimizer.step()
 
-            train_loss += loss.item()
+            train_loss += loss.item() if loss.item() is not float('nan') else print(f'batch: {batch} in epoch {epoch} got calculated a NaN value')
 
             if loss.item() < best_loss:
                 best_loss = loss.item()
@@ -368,7 +368,6 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
         model.eval()
         val_loss = 0.0
         dice = 0.0
-        total_samples = 0
         with torch.no_grad():
             for batch in tqdm(val_loader, total=len(val_loader)):
                 images = batch['image'].to(device)
@@ -386,7 +385,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=1e
                 #dice_scores = compute_dice(prediction, masks, ignore_empty=True) -> mit compute_dice() hab ich immer wieder NANs erhalten
                 #wenn es für eine Klasse keinen Overlap auf der Klasse gab
 
-                dice += 1 - mean_loss.item()  #(dim=(2,3,4) when using volumes)
+                dice += 1 - mean_loss.item()
 
         val_loss /= len(val_loader)
         dice_score_val = (dice / len(val_loader))
