@@ -6,8 +6,10 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-
-
+from glob import glob
+from collections import Counter
+from sklearn.model_selection import train_test_split
+import nibabel as nib
 
 def save_model(model, epoch, path='best_model.pth'):
     """Speichert das Modell."""
@@ -21,15 +23,19 @@ def plot_images(images, predictions, targets, epoch, batch, loss,num_images=5):
     """Plotting function for images, predictions, and targets.
     images shape = (1, 5, 512, 512)
     """
-    fig, axs = plt.subplots(num_images, 3, figsize=(15, 5 * num_images))
+    fig, axs = plt.subplots(num_images, 4, figsize=(15, 5 * num_images))
     fig.text(0.01, 0.5, f"Epoch:{epoch}, Batch:{batch}, Loss:{loss}", va='center', ha='center', rotation='vertical', fontsize=12)
     for i in range(num_images):
-        axs[i, 0].imshow(images[i][0].cpu().numpy())#.transpose(1, 2, 0))  # nur notwendig wenn Input = (B, 1, H,W)
-        axs[i, 0].set_title("Input Image")
-        axs[i, 1].imshow(predictions[i].cpu().numpy().squeeze(), cmap='gray')  # Squeeze to remove channel dimension
-        axs[i, 1].set_title("Prediction")
-        axs[i, 2].imshow(targets[i].cpu().numpy().squeeze(), cmap='gray')  # Squeeze to remove channel dimension
-        axs[i, 2].set_title("Target")
+        # Eingabebild: ncct und tmax Bild
+        axs[i, 0].imshow(images[i][0].cpu().numpy().squeeze(), cmap='gray')  # ncct Bild
+        axs[i, 0].set_title("NCCT Input")
+        axs[i, 1].imshow(images[i][1].cpu().numpy().squeeze(), cmap='gray')  # tmax Bild
+        #axs[i, 1].imshow(images[i][0].cpu().numpy().squeeze(), cmap='gray')  # tmax Bild
+        axs[i, 1].set_title("TMax Input")
+        axs[i, 2].imshow(predictions[i].cpu().numpy().squeeze(), cmap='gray')  # prediction map
+        axs[i, 2].set_title("Prediction")
+        axs[i, 3].imshow(targets[i].cpu().numpy().squeeze(), cmap='gray')  # target map
+        axs[i, 3].set_title("Target")
 
     for ax in axs.flat:
         ax.axis('off')
@@ -96,9 +102,9 @@ def plot_dist(slice):
     plt.show()
 
 
-def min_max_normalization(data):
-    min_val = np.min(data)
-    max_val = np.max(data)
+def min_max_normalization(data, clip_min, clip_max):
+    min_val = clip_min #np.min(data)
+    max_val = clip_max #np.max(data)
     if min_val == max_val:
         normalized_data = (data - min_val + 1e-8) / (max_val - min_val + 1e-8)
     else:
@@ -143,3 +149,88 @@ class DiceLoss(nn.Module):
 #target = torch.randint(low=0, high=2, size=(1, 256, 256))
 
 #loss = dice_loss(pred, target)
+
+
+def compute_ranges_of_volumes(vol_paths):
+    min_x = 5000
+    min_y = 5000
+    min_z = 5000
+    max_x = 0
+    max_y = 0
+    max_z = 0
+    for vol_path in vol_paths:
+        cur_vol = nib.load(vol_path).get_fdata()
+        min_x = cur_vol.shape[0] if cur_vol.shape[0] < min_x else min_x
+        min_y = cur_vol.shape[1] if cur_vol.shape[1] < min_y else min_y
+        min_z = cur_vol.shape[2] if cur_vol.shape[2] < min_z else min_z
+        max_x = cur_vol.shape[0] if cur_vol.shape[0] > max_x else max_x
+        max_y = cur_vol.shape[1] if cur_vol.shape[1] > max_y else max_y
+        max_z = cur_vol.shape[2] if cur_vol.shape[2] > max_z else max_z
+
+    return (min_x, min_y, min_z), (max_x, max_y, max_z)
+
+#remote paths liegen nicht in ./data_/ ->
+all_paths = glob("/storage/ISLES24/**/*.gz", recursive=True)
+msk_paths = list(filter(lambda k: 'msk' in k, all_paths))
+#min_coords, max_coords = compute_ranges_of_volumes(msk_paths)
+
+
+def compute_class_weights(targets, num_classes):
+    """
+    Berechnet die Gewichte für jede Klasse basierend auf der inversen Häufigkeit.
+
+    Args:
+        targets (List[torch.Tensor]): Liste von Ground-Truth-Masken (B x H x W).
+        num_classes (int): Anzahl der Klassen.
+
+    Returns:
+        torch.Tensor: Tensor mit den Gewichten für jede Klasse.
+    """
+    class_counts = Counter()
+
+    for target in targets:
+        # Flatten das Ziel, um die Häufigkeit zu zählen
+        class_counts.update(target.flatten().tolist())
+
+    # Berechnung der Frequenz jeder Klasse
+    class_freq = np.array([class_counts.get(i) for i in range(num_classes)], dtype=np.float32)
+
+    # Vermeidung von Division durch Null - nur zur Sicherheit
+    class_freq = np.where(class_freq == 0, 1, class_freq)
+
+    # Inverse Häufigkeit als Gewicht
+    class_weights = 1.0 / class_freq
+
+    # Normalisierung der Gewichte (optional) -> um zu verhindern dass es zu große class_weights Unterschiede auf Skala gibt
+    class_weights = class_weights / class_weights.sum() * num_classes
+
+    return torch.tensor(class_weights)
+
+
+def build_a_full_target_dataset_tensor(mask_paths):
+    target_list = []
+    for mask_path in mask_paths:
+        mask = nib.load(mask_path).get_fdata()
+        mask = torch.from_numpy(np.round(mask))
+        target_list.append(mask)
+    return target_list
+
+
+root_dir = '/storage/ISLES24/ISLES24/derivatives'
+# Liste aller Subjekte, falls
+subjects = os.listdir(root_dir)
+
+train_subjects, test_subjects = train_test_split(subjects, test_size=0.1, random_state=42)
+train_subjects, val_subjects = train_test_split(train_subjects, test_size=0.2, random_state=42)
+
+#local paths            paths_scans = glob("./data_/**/*.gz", recursive=True)
+paths_scans = glob("/storage/ISLES24/**/*.gz", recursive=True) #remote paths
+#mask_paths = list(filter(lambda k: 'msk' in k and any(name in k for name in train_subjects), paths_scans)) #val_subjects
+mask_paths = list(filter(lambda k: 'msk' in k , paths_scans))
+
+target_list = build_a_full_target_dataset_tensor(mask_paths)
+
+
+num_classes = 2
+class_weights = compute_class_weights(target_list, num_classes)
+print(f'Klassengewichte: {class_weights}') #Klassengewichte: tensor([0.0058, 1.9942])
